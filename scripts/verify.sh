@@ -55,6 +55,7 @@ run shell_syntax shell_syntax
 run config_syntax config_syntax
 run tls_certificates certificates
 run pcap_parser python3 scripts/test_pcap.py -v
+run routing_unit python3 scripts/test-routing.py -v
 if python3 -c 'import yaml' >/dev/null 2>&1; then
   run yaml_syntax python3 -c 'import yaml; [yaml.safe_load(open(p)) for p in ("docker-compose.yml", "docker-compose.test.yml")]'
 else

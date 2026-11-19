@@ -10,6 +10,10 @@ pub enum Role { Client, Relay, Exit }
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub role: Role,
+    /// Serve a real operator-owned static HTTPS website on the same TLS port.
+    pub cover_enabled: bool,
+    pub cover_root: Option<PathBuf>,
+    pub cover_domain: Option<String>,
     pub listen: String,
     pub relay_addr: Option<String>,
     pub next_hop: Option<String>,
@@ -36,7 +40,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            role: Role::Client, listen: "127.0.0.1:1080".into(),
+            role: Role::Client, cover_enabled: false, cover_root: None, cover_domain: None, listen: "127.0.0.1:1080".into(),
             relay_addr: None, next_hop: None, sni: None,
             cert_path: None, key_path: None, ca_path: None, password: None,
             upstream_password: None, allow_remote_clients: false,
@@ -62,6 +66,9 @@ impl Config {
         set_string!("RUSTINE_RELAY_ADDR", relay_addr);
         set_string!("RUSTINE_NEXT_HOP", next_hop);
         set_string!("RUSTINE_SNI", sni);
+        set_string!("RUSTINE_COVER_DOMAIN", cover_domain);
+        if let Ok(v) = env::var("RUSTINE_COVER_ROOT") { s.cover_root = Some(PathBuf::from(v)); }
+        if let Ok(v) = env::var("RUSTINE_COVER_ENABLED") { s.cover_enabled = parse_bool(&v)?; }
         set_string!("RUSTINE_PASSWORD", password);
         set_string!("RUSTINE_UPSTREAM_PASSWORD", upstream_password);
         for (env_name, slot) in [
@@ -111,6 +118,16 @@ impl Config {
             ensure!(addr.ip().is_loopback(),
                 "refusing non-loopback client proxy listener; set allow_remote_clients=true to permit LAN clients");
         }
+        if self.cover_enabled {
+            ensure!(self.role != Role::Client, "cover website is only available on server roles");
+            let host = required(&self.cover_domain, "cover_domain")?;
+            ensure!(host.len() <= 253 && host.contains('.') &&
+                host.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-')),
+                "cover_domain must be a valid DNS name you control");
+            let root = required_path(&self.cover_root, "cover_root")?;
+            ensure!(root.is_dir() && root.join("index.html").is_file(),
+                "cover_root must contain a readable index.html");
+        }
         ensure!(self.max_padding <= 4096, "max_padding must be <= 4096");
         ensure!(self.jitter_ms <= 2000, "jitter_ms must be <= 2000");
         ensure!((1..=60).contains(&self.connect_timeout_secs), "connect_timeout_secs must be 1..60");
@@ -151,6 +168,16 @@ mod tests {
         let mut c = Config::default(); c.password = Some("a-long-test-secret-123456".into());
         c.sni_spoofing = true;
         assert!(c.validate().unwrap_err().to_string().contains("unsupported"));
+    }
+    #[test] fn cover_requires_domain_and_site() {
+        let mut c=Config::default();
+        c.password=Some("a-long-test-secret-123456".into());
+        c.role=Role::Exit;
+        c.cert_path=Some("unused".into()); c.key_path=Some("unused".into());
+        c.cover_enabled=true;
+        assert!(c.validate().unwrap_err().to_string().contains("cover_domain"));
+        c.cover_domain=Some("site.example".into());
+        assert!(c.validate().unwrap_err().to_string().contains("cover_root"));
     }
     #[test] fn default_private_access_is_off() { assert!(!Config::default().allow_private_targets); }
     #[test] fn unknown_config_keys_fail_closed() {

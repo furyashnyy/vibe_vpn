@@ -1,5 +1,8 @@
 role = "relay"
-listen = "0.0.0.0:8443"
+listen = "0.0.0.0:443"
+cover_enabled = true
+cover_domain = "relay.example.net" # the operator-owned hostname, not a third-party SNI
+cover_root = "./cover/site"
 next_hop = "FOREIGN_EXIT_IP:8443"
 sni = "exit.example.net" # outbound TLS hostname must match exit certificate
 ca_path = "./tls/exit-ca.pem"

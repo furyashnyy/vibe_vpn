@@ -23,13 +23,26 @@ fn verify_proof(key: &[u8; 32], label: &[u8], salt: &[u8;64], candidate: &[u8;32
 /// HMAC proofs are transcript-bound; directions derive independent AEAD keys.
 pub async fn authenticate<S>(stream: &mut S, password: &str, initiator: bool) -> Result<Keys>
 where S: AsyncRead + AsyncWrite + Unpin {
+    authenticate_with_prefix(stream, password, initiator, None).await
+}
+
+/// Server-side handoff after distinguishing a browser HTTP request from the
+/// 32-byte random tunnel nonce. The prefix must be replayed into transcript.
+pub async fn authenticate_with_prefix<S>(stream: &mut S, password: &str, initiator: bool, prefix: Option<[u8; 4]>) -> Result<Keys>
+where S: AsyncRead + AsyncWrite + Unpin {
+    if initiator && prefix.is_some() { bail!("nonce prefix only permitted for responder"); }
     let mut own_nonce = [0u8; 32]; OsRng.fill_bytes(&mut own_nonce);
     let mut peer_nonce = [0u8; 32];
     if initiator {
         stream.write_all(&own_nonce).await?;
         stream.read_exact(&mut peer_nonce).await?;
     } else {
-        stream.read_exact(&mut peer_nonce).await?;
+        if let Some(prefetched) = prefix {
+            peer_nonce[..4].copy_from_slice(&prefetched);
+            stream.read_exact(&mut peer_nonce[4..]).await?;
+        } else {
+            stream.read_exact(&mut peer_nonce).await?;
+        }
         stream.write_all(&own_nonce).await?;
     }
     let mut salt = [0u8; 64];
@@ -62,6 +75,18 @@ mod tests {
         let (x, y) = tokio::join!(authenticate(&mut a, "this-is-a-long-test-password", true), authenticate(&mut b, "this-is-a-long-test-password", false));
         let (x, y) = (x.unwrap(), y.unwrap());
         assert_eq!(x.send, y.recv); assert_eq!(x.recv, y.send); assert_ne!(x.send, x.recv);
+    }
+    #[tokio::test]
+    async fn prefetched_nonce_preserves_authentication() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let responder = async {
+            let mut prefix = [0u8;4];
+            server.read_exact(&mut prefix).await.unwrap();
+            authenticate_with_prefix(&mut server, "strong-shared-secret-2345", false, Some(prefix)).await
+        };
+        let (left, right) = tokio::join!(authenticate(&mut client,"strong-shared-secret-2345",true),responder);
+        let (left,right)=(left.unwrap(),right.unwrap());
+        assert_eq!(left.send,right.recv); assert_eq!(left.recv,right.send);
     }
     #[tokio::test]
     async fn wrong_secret_is_rejected() {

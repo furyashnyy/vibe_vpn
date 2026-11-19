@@ -2,7 +2,7 @@ use std::{net::{IpAddr, SocketAddr}, sync::Arc};
 use anyhow::{Context, Result, bail, ensure};
 use tokio::{io::{AsyncRead,AsyncWrite,AsyncReadExt,AsyncWriteExt}, net::{TcpListener, TcpStream,lookup_host}, sync::Semaphore, time::{Duration,timeout}};
 use tracing::{info,warn};
-use crate::{config::{Config, Role}, crypto, peer::{self,Peer}, protocol::{self,Kind,Reader,Writer}, tls};
+use crate::{cover, config::{Config, Role}, crypto, peer::{self,Peer}, protocol::{self,Kind,Reader,Writer}, tls};
 
 pub async fn run(cfg: Arc<Config>) -> Result<()> {
     let listener=TcpListener::bind(&cfg.listen).await?;
@@ -18,7 +18,19 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
             let _permit=permit;
             let result=async {
                 let mut stream=timeout(Duration::from_secs(cfg.connect_timeout_secs),acceptor.accept(socket)).await.context("incoming TLS timeout")??;
-                let keys=timeout(Duration::from_secs(cfg.connect_timeout_secs),crypto::authenticate(&mut stream,cfg.secret(),false)).await.context("incoming auth timeout")??;
+                let prefetched = if cfg.cover_enabled {
+                    let mut first=[0u8;4];
+                    timeout(Duration::from_secs(cfg.connect_timeout_secs),stream.read_exact(&mut first)).await.context("initial TLS data timeout")??;
+                    if cover::looks_like_http(&first) {
+                        let root=cfg.cover_root.as_deref().context("cover_root missing")?;
+                        let domain=cfg.cover_domain.as_deref().context("cover_domain missing")?;
+                        timeout(Duration::from_secs(cfg.connect_timeout_secs),cover::serve(&mut stream,first,root,domain))
+                            .await.context("cover HTTP request timeout")??;
+                        return Ok(());
+                    }
+                    Some(first)
+                } else { None };
+                let keys=timeout(Duration::from_secs(cfg.connect_timeout_secs),crypto::authenticate_with_prefix(&mut stream,cfg.secret(),false,prefetched)).await.context("incoming auth timeout")??;
                 let connection=Peer::new(stream,keys,&cfg);
                 match cfg.role {
                     Role::Relay=>serve_relay(connection,&cfg).await,

@@ -134,10 +134,25 @@ if [[ "$ROLE" == 'relay' ]]; then
   ask EXIT_CA 'Путь к файлу ca.pem, скопированному с exit-сервера' ''
   [[ -s "$EXIT_CA" ]] || die 'copy exit/ca.pem from exit VPS first (not ca.key!)'
 fi
-ask PORT 'Порт текущего сервера' 8443
+if [[ "$ROLE" == 'relay' ]]; then
+  ask PORT 'Порт текущего сервера (HTTPS сайт и туннель)' 443
+else
+  ask PORT 'Порт текущего сервера' 8443
+fi
 [[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT>=1 && PORT<=65535)) || die 'invalid TCP port'
 ask SNI 'SNI (DNS-имя ВАШЕГО TLS-сервера)' "${ROLE}.example.net"
 [[ "$SNI" =~ ^[a-zA-Z0-9.-]+$ ]] || die 'invalid SNI hostname'
+COVER=n
+TLS_MODE=selfsigned
+if [[ "$ROLE" == 'relay' ]]; then
+  ask COVER 'Разместить полноценный HTTPS-сайт на том же порту? [y/n]' y
+  [[ "$COVER" =~ ^(y|Y|yes|YES|n|N|no|NO)$ ]] || die 'use y or n'
+  if [[ "$COVER" =~ ^(y|Y|yes|YES)$ ]]; then
+    ask TLS_MODE 'Сертификат сайта [acme/selfsigned] (acme = публично доверенный)' acme
+    [[ "$TLS_MODE" == 'acme' || "$TLS_MODE" == 'selfsigned' ]] || die 'choose acme or selfsigned'
+    log "Cover site requires $SNI to be YOUR domain, DNS A/AAAA -> RU_RELAY IP (DNS-only, not proxied)."
+  fi
+fi
 ask_secret PASSWORD 'Секрет для входящих соединений (Enter = сгенерировать)'
 if [[ -z "$PASSWORD" ]]; then PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"; fi
 [[ "${#PASSWORD}" -ge 16 ]] || die 'password must contain at least 16 characters'
@@ -153,7 +168,38 @@ ask AUTO 'Включить автообновление? [y/n]' n
 [[ "$AUTO" =~ ^(y|Y|yes|YES|n|N|no|NO)$ ]] || die 'use y or n'
 mkdir -p "$PREFIX/tls/server"
 chmod 0750 "$PREFIX" "$PREFIX/tls" "$PREFIX/tls/server"
-if [[ -s "$PREFIX/tls/server/cert.pem" && -s "$PREFIX/tls/server/key.pem" && -s "$PREFIX/tls/server/ca.pem" ]]; then
+if [[ "$TLS_MODE" == 'acme' ]]; then
+  # Certbot owns renewal via HTTP-01 on TCP/80, while Rustine serves HTTPS on TCP/443.
+  # A publicly trusted certificate avoids browser security interstitials.
+  apt-get install -y -qq --no-install-recommends certbot >/dev/null
+  if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp >/dev/null || true; fi
+  log 'Requesting publicly trusted certificate (requires public DNS and reachable TCP/80).'
+  certbot certonly --standalone --preferred-challenges http \
+    --non-interactive --agree-tos --register-unsafely-without-email -d "$SNI" \
+    || die 'ACME HTTP-01 failed; check DNS, Cloudflare DNS-only setting, and TCP/80.'
+  CERTDIR="/etc/letsencrypt/live/$SNI"
+  [[ -s "$CERTDIR/fullchain.pem" && -s "$CERTDIR/privkey.pem" ]] || die 'certbot did not produce TLS keypair'
+  if [[ -e "$PREFIX/tls/server/key.pem" || -e "$PREFIX/tls/server/cert.pem" ]]; then
+    mkdir -p "$PREFIX/backups"
+    cp -a "$PREFIX/tls/server" "$PREFIX/backups/old-tls-$(date +%Y%m%d-%H%M%S)"
+    chmod 0700 "$PREFIX/backups"
+  fi
+  install -o root -g rustine -m 0644 "$CERTDIR/fullchain.pem" "$PREFIX/tls/server/cert.pem"
+  install -o root -g rustine -m 0640 "$CERTDIR/privkey.pem" "$PREFIX/tls/server/key.pem"
+  install -o root -g rustine -m 0644 /etc/ssl/certs/ca-certificates.crt "$PREFIX/tls/server/ca.pem"
+  openssl x509 -in "$PREFIX/tls/server/cert.pem" -noout -checkhost "$SNI" >/dev/null || die 'wrong ACME certificate SAN'
+  # Renewal hook copies root-only certbot material into rustine-readable paths.
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > "/etc/letsencrypt/renewal-hooks/deploy/rustine-$SNI.sh" <<HOOK
+#!/bin/sh
+set -eu
+[ "\${RENEWED_LINEAGE:-}" = "$CERTDIR" ] || exit 0
+install -o root -g rustine -m 0644 "$CERTDIR/fullchain.pem" "$PREFIX/tls/server/cert.pem"
+install -o root -g rustine -m 0640 "$CERTDIR/privkey.pem" "$PREFIX/tls/server/key.pem"
+systemctl try-restart rustine.service || true
+HOOK
+  chmod 0750 "/etc/letsencrypt/renewal-hooks/deploy/rustine-$SNI.sh"
+elif [[ -s "$PREFIX/tls/server/cert.pem" && -s "$PREFIX/tls/server/key.pem" && -s "$PREFIX/tls/server/ca.pem" ]]; then
   # Never reuse an existing certificate for a different hostname.
   openssl x509 -in "$PREFIX/tls/server/cert.pem" -noout -checkhost "$SNI" >/dev/null \
     || die "existing TLS certificate does not cover SNI=$SNI; rotate certificates deliberately"
@@ -197,6 +243,19 @@ idle_timeout_secs = 600
 jitter_ms = 0
 sni_spoofing = false
 CONFIG
+if [[ "$COVER" =~ ^(y|Y|yes|YES)$ ]]; then
+  mkdir -p "$PREFIX/cover"
+  # No symlinks in the bundled site; static files owned by root, read by service.
+  cp -a "$SRC/cover/site/." "$PREFIX/cover/"
+  chown -R root:rustine "$PREFIX/cover"
+  find "$PREFIX/cover" -type d -exec chmod 0750 {} +
+  find "$PREFIX/cover" -type f -exec chmod 0640 {} +
+  cat >> "$PREFIX/config.toml" <<CONFIG
+cover_enabled = true
+cover_domain = "$SNI"
+cover_root = "$PREFIX/cover"
+CONFIG
+fi
 if [[ "$ROLE" == 'relay' ]]; then
   cat >> "$PREFIX/config.toml" <<CONFIG
 next_hop = "$EXIT_HOST:$EXIT_PORT"
@@ -271,6 +330,12 @@ if ! systemctl is-active --quiet rustine.service; then
 fi
 HOST=$(hostname -I 2>/dev/null | awk '{print $1}')
 log "Role: $ROLE | TCP port: $PORT | local certificate SNI: $SNI"
+if [[ "$COVER" =~ ^(y|Y|yes|YES)$ ]]; then
+  log "HTTPS website: https://$SNI:$PORT/ (if on 443, standard https://$SNI/)"
+  if [[ "$TLS_MODE" == 'selfsigned' ]]; then
+    log 'NOTE: self-signed TLS will display a browser trust warning; use ACME for production.'
+  fi
+fi
 log "Share ONLY the CA file $PREFIX/tls/server/ca.pem with the connecting peer."
 if [[ "$ROLE" == 'relay' ]]; then
   log "Client: rustine --config configs/client.example.toml (relay_addr=<RU_RELAY_IP>:$PORT; sni=$SNI)"

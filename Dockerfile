@@ -11,14 +11,14 @@ RUN groupadd --gid 10001 rustine && useradd --system --uid 10001 --gid rustine -
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/target/release/rustine /usr/local/bin/rustine
 USER rustine
-EXPOSE 8443/tcp
+EXPOSE 443/tcp 8443/tcp
 ENTRYPOINT ["/usr/local/bin/rustine"]
 
 # Test stage is intentionally separate from the minimal production runtime.
 FROM rust:bookworm AS test
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    curl python3 openssl tcpdump ca-certificates \
+    curl python3 nodejs openssl tcpdump ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY . .

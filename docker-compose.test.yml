@@ -28,6 +28,9 @@ services:
     entrypoint: ["/usr/local/bin/rustine"]
     environment:
       RUSTINE_ROLE: relay
+      RUSTINE_COVER_ENABLED: "true"
+      RUSTINE_COVER_DOMAIN: relay.test
+      RUSTINE_COVER_ROOT: /workspace/cover/site
       RUSTINE_LISTEN: 0.0.0.0:8443
       RUSTINE_NEXT_HOP: exit:8443
       RUSTINE_SNI: exit.test

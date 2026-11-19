@@ -1,75 +1,86 @@
 # Rustine / Vibe VPN
 
-**v0.3.0** — reliability and deployment hardening.
+**Rust 2024 · two-hop TLS tunnel · self-hosted HTTPS cover · selective routing**
 
-**Two-hop authenticated TLS proxy** · Rust 2024 · Linux / Docker
+Rustine connects a local SOCKS5/HTTP CONNECT client to an RU relay, which forwards authenticated traffic to a foreign exit. It is an experimental TCP proxy, **not** an implementation of VLESS/XTLS-Reality.
 
 ```text
-SOCKS5 / HTTP CONNECT          TLS 1.3 + AEAD                 TLS 1.3 + AEAD
-  Client :1080  ─────────────► RU_RELAY :8443 ─────────────► FOREIGN_EXIT :8443 ──► Internet
-                  PSK: relay                   PSK: exit
+Browser / apps
+  ├── Russian domains and IP ranges ──────── direct (client-side rules)
+  └── Other TCP ─── SOCKS5 ─── RU_RELAY ─── FOREIGN_EXIT ─── Internet
+                                 │
+                     HTTPS website on :443
+                      for ordinary browsers
 ```
 
-A small, independently configured TCP tunnel. Each hop uses **real TLS 1.3**, validates a privately issued certificate and performs challenge-response authentication before exchanging ChaCha20-Poly1305 frames. Relay and exit **must have different secrets**; clients never receive the exit secret. By default, the exit refuses private/reserved destinations, and the client binds only to loopback. Server connections are capped at 256, and authenticated idle streams time out after 600 seconds (both configurable).
+## Architecture
 
-## Install · systemd
+| Component | Listener | Purpose |
+|---|---|---|
+| `client` | `127.0.0.1:1080` | SOCKS5 and HTTP CONNECT |
+| `relay` | `:443/tcp` | Authenticated tunnel + public static HTTPS website |
+| `exit` | `:8443/tcp` | Destination TCP connections |
 
-On both VPSs, use a reviewed checkout (Debian/Ubuntu):
+Every hop uses verified TLS 1.3, distinct PSKs, and AEAD frames. The relay only connects to its configured exit. HTTPS requests on the same port are served from `cover/site/`, including HTML, CSS, assets and `404` responses. **The SNI must be a domain you own, with a matching certificate**; a third-party SNI or a cover site does not unblock an IP-level ban.
+
+## Deploy
+
+Install on the **exit first** (Debian/Ubuntu, root), then copy its public `ca.pem` securely to the relay. Run the same installer on the RU relay:
 
 ```bash
- git clone https://github.com/furyashnyy/vibe_vpn.git
- cd vibe_vpn
- sudo bash install.sh
+sudo bash install.sh
 ```
 
-1. **FOREIGN_EXIT:** choose `exit`; the installer generates a certificate and an exit secret. Securely copy `/etc/rustine/tls/server/ca.pem` and the generated exit secret to the RU relay administrator.
-2. **RU_RELAY:** choose `relay`; provide exit address, exact exit certificate hostname (SNI), copied CA, **its exit secret**, and a **different** incoming client secret. Securely copy its `ca.pem` and incoming secret to your client.
-3. **Client:** configure `configs/client.example.toml`; set `RUSTINE_PASSWORD_FILE` or `RUSTINE_PASSWORD` to the **relay** secret, then run:
+Choose `exit` or `relay`. For the relay, select port **443**, enable the website and choose `acme` to issue a publicly trusted TLS certificate. Requirements: DNS **A/AAAA → RU relay IP** (Cloudflare **DNS-only**), TCP ports **80** (ACME renewal) and **443**, domain fully under your control. The installer configures `certbot` renewal and keeps the TLS private key on the server. The site files are copied into `/etc/rustine/cover/` and can be edited there.
+
+For Docker Compose, create `.env` from `.env.example`, generate/provide certs and secrets, then deploy profiles on **different hosts**:
 
 ```bash
-cargo run --release -- --config configs/client.example.toml
-curl --socks5-hostname 127.0.0.1:1080 https://example.com
-```
-
-The installer supports `--upgrade` (keeps config, rolls back the previous binary if service restart fails) and `--uninstall` (removes local keys and service). It deliberately does **not** enable UFW globally. The `--upgrade` timer is opt-in; review release provenance before enabling unattended updates.
-
-## Docker Compose
-
-Use **separate hosts** and `.env` based on `.env.example`. Generate each host's certificate with `scripts/make-certs.sh <your-hostname> tls/<role>`. The exit keeps `secrets/exit-password`. The relay needs both its distinct `secrets/relay-password` and the exit's `secrets/exit-password`, plus a copy of the exit CA at `tls/exit-ca.pem`. Do **not** copy the CA private key. Grant runtime container GID 10001 access to certificates and secrets:
-
-```bash
-sudo chgrp -R 10001 tls secrets
-sudo chmod 750 tls secrets tls/*/
-sudo chmod 640 tls/*/key.pem secrets/*
-# Foreign VPS:
+cp .env.example .env
+# On the foreign VPS:
 docker compose --profile foreign up -d --build
-# RU VPS:
+# On the RU VPS:
 docker compose --profile ru up -d --build
 ```
 
-Only the matching profile is started on each VPS. The default exit egress policy denies loopback/private/reserved IPs. `ALLOW_PRIVATE_TARGETS=true` is intended **only** for isolated testing.
+Enable `COVER_ENABLED=true` on the relay after supplying an operator-owned TLS certificate and matching `RELAY_DOMAIN`. Docker Compose **does not** provision certificates; the interactive installer supports Certbot.
 
-## Tests · no GitHub Actions
+## Routing: Russian sites direct
+
+Start the Rustine client on your PC before configuring routing. Two client modes are provided:
+
+**Browser only** — generate PAC and configure a browser to use it:
+
+```bash
+python3 scripts/generate-routing.py --mode pac --output rustine.pac
+```
+
+`.ru`, `.su`, `.рф` and local addresses use `DIRECT`; all other browser requests use `SOCKS5 127.0.0.1:1080`. This does **not** cover native apps or IP geolocation. If the SOCKS proxy is unavailable, non-RU requests fail rather than silently falling back to direct access.
+
+**System TCP traffic (Windows/Linux)** — generate a [sing-box](https://sing-box.sagernet.org/) 1.14+ TUN config:
+
+```bash
+python3 scripts/generate-routing.py --mode tun --relay-ip <RU_RELAY_PUBLIC_IP> --output rustine-tun.json
+sing-box check -c rustine-tun.json
+# Administrator/root rights are required for TUN:
+sing-box run -c rustine-tun.json
+```
+
+TUN excludes the **RU relay IP** to prevent recursive proxying. It routes `.ru/.su/.рф` and RU GeoIP ranges directly, routes other TCP through Rustine SOCKS5, and blocks non-DNS UDP (Rustine has no UDP tunnel yet). The `geoip-ru.srs` rule-set is downloaded via Rustine; initial startup requires a working SOCKS5 proxy. DNS uses a local resolver; DNS privacy and all applications' routing still require verification on the target operating system.
+
+## Verification
 
 ```bash
 git pull
-bash scripts/verify.sh  # Bash/TOML/TLS/PCAP; runs without Docker
-bash scripts/test.sh    # build + integration tests; requires Docker
-# Direct Compose invocation (unlike test.sh, may not propagate tester exit status):
-docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+bash scripts/verify.sh                 # Python/Bash/OpenSSL tests
+bash scripts/verify.sh --cargo         # also run Rust unit tests
+bash scripts/test.sh                   # Docker TCP / TLS / website / DPI smoke tests
 ```
 
-Tests: crypto/framing, split-TCP PCAP parser, two-hop SOCKS5 and HTTP CONNECT, wrong-password denial, invalid certificate rejection, unsupported SNI spoof rejection and structural TLS/SNI PCAP inspection. The Docker report is `reports/report.txt`; the offline check report is `reports/static-report.txt`. Detailed logs and capture are saved beside them. `scripts/test.sh` uses `--exit-code-from tester`, yielding nonzero exit on a failing test.
+Reports: `reports/`. `rustine --config /etc/rustine/config.toml check` validates server configuration and TLS material. See `configs/` for TOML examples. Use `sudo bash install.sh --upgrade` for installed systemd services and `--uninstall` to remove them.
 
-## Scope
+## Boundaries
 
-| Capability | Status |
-| --- | --- |
-| SOCKS5, HTTP CONNECT, TCP relay, TLS 1.3, AEAD | Implemented; end-to-end Docker verification pending |
-| Separate hop secrets, trusted CA, client loopback guard | Implemented |
-| Configurable SNI | Must match a certificate the caller trusts |
-| Encrypted padding, optional jitter | Implemented, **not** an anti-DPI guarantee |
-| Forged ClientHello / false TCP sequence, QUIC | **TODO**; forged packet flag is rejected |
-| Whitelist/IP blocking bypass | Not guaranteed; both physical links must be reachable |
+This is **not a complete VPN**: TUN currently forwards TCP only; no UDP relay, IPv6 route leak audit, QUIC, or XTLS-Reality. Forged ClientHello injection is explicitly unsupported, and neither TLS padding nor a real site guarantees resistance to active probing or regional IP blocking. Validate all deployment paths and Rust compilation before production use.
 
-**Security note:** A relay terminates the first TLS+AEAD hop and can inspect forwarded data. The project has not received an external security audit. Never commit secrets or CA private keys. A TLS packet smoke test cannot demonstrate resistance to active probing or sophisticated traffic analysis.
+MIT · Rustine contributors

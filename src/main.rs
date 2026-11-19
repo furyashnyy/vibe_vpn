@@ -1,4 +1,5 @@
 mod client;
+mod cover;
 mod config;
 mod crypto;
 mod obfuscation;

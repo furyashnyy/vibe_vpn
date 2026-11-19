@@ -86,7 +86,20 @@ packet() {
   TCPDUMP_PID=""
   python3 scripts/inspect_pcap.py /reports/test.pcap --sni relay.test
 }
+cover_site() {
+  local base="https://relay.test:8443"
+  local curlargs=(--noproxy '*' --connect-to relay.test:8443:relay:8443 --cacert /testcerts/relay/ca.pem --connect-timeout 5 --max-time 12)
+  curl "${curlargs[@]}" -fsS "$base/" | grep -q 'FIELDNOTES'
+  curl "${curlargs[@]}" -fsS "$base/about" | grep -q 'Fieldnotes'
+  curl "${curlargs[@]}" -fsS "$base/assets/site.css" | grep -q -- '--accent'
+  test "$(curl "${curlargs[@]}" -sS -o /dev/null -w '%{http_code}' "$base/nonexistent")" = 404
+  test "$(curl "${curlargs[@]}" -sS -o /dev/null -w '%{http_code}' -I "$base/")" = 200
+  test "$(curl --noproxy '*' --connect-to wrong.test:8443:relay:8443 -k -sS -o /dev/null -w '%{http_code}' https://wrong.test:8443/)" = 421
+}
+routing_unit() { python3 scripts/test-routing.py -v; }
 run_test crypto_framing_unit unit
+run_test static_cover_site cover_site
+run_test split_routing_unit routing_unit
 run_test pcap_parser_unit pcap_parser_unit
 run_test forged_sni_rejected reject_spoofing_config
 run_test invalid_ca_rejected reject_invalid_cert

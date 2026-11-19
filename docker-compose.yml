@@ -9,7 +9,10 @@ services:
     restart: unless-stopped
     environment:
       RUSTINE_ROLE: relay
-      RUSTINE_LISTEN: "0.0.0.0:${RELAY_PORT:-8443}"
+      RUSTINE_COVER_ENABLED: "${COVER_ENABLED:-false}"
+      RUSTINE_COVER_DOMAIN: "${RELAY_DOMAIN:-relay.example.net}"
+      RUSTINE_COVER_ROOT: /cover
+      RUSTINE_LISTEN: "0.0.0.0:${RELAY_PORT:-443}"
       RUSTINE_NEXT_HOP: "${EXIT_HOST:-127.0.0.1}:${EXIT_PORT:-8443}"
       RUSTINE_SNI: "${EXIT_SNI:-exit.example.net}"
       RUSTINE_PASSWORD_FILE: /run/secrets/relay_password
@@ -22,14 +25,15 @@ services:
       RUSTINE_MAX_PADDING: "${MAX_PADDING:-256}"
       RUSTINE_JITTER_MS: "${JITTER_MS:-0}"
     volumes:
+      - ./cover/site:/cover:ro
       - ./tls/relay/cert.pem:/tls/relay/cert.pem:ro
       - ./tls/relay/key.pem:/tls/relay/key.pem:ro
       - ./tls/exit-ca.pem:/tls/exit-ca.pem:ro
       - ./secrets/relay-password:/run/secrets/relay_password:ro
       - ./secrets/exit-password:/run/secrets/exit_password:ro
-    ports: ["${RELAY_PORT:-8443}:${RELAY_PORT:-8443}/tcp"]
+    ports: ["${RELAY_PORT:-443}:${RELAY_PORT:-443}/tcp"]
     healthcheck:
-      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:${RELAY_PORT:-8443}"]
+      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:${RELAY_PORT:-443}"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -13,8 +13,10 @@ pub fn acceptor(cfg: &Config) -> Result<TlsAcceptor> {
     let cert_path=cfg.cert_path.as_deref().context("cert_path missing")?;
     let key_path=cfg.key_path.as_deref().context("key_path missing")?;
     let key=rustls_pemfile::private_key(&mut BufReader::new(File::open(key_path)?))?.context("no PEM private key")?;
-    let conf=ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+    let mut conf=ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth().with_single_cert(certs(cert_path)?,key)?;
+    // A browser negotiates HTTP/1.1; legacy Rustine clients offer no ALPN and keep working.
+    if cfg.cover_enabled { conf.alpn_protocols=vec![b"http/1.1".to_vec()]; }
     Ok(TlsAcceptor::from(Arc::new(conf)))
 }
 pub fn connector(cfg: &Config) -> Result<TlsConnector> {
