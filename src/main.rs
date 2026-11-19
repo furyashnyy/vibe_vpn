@@ -37,7 +37,15 @@ async fn main()->Result<()> {
         println!("healthy"); return Ok(());
     }
     let cfg=Arc::new(Config::load(cli.config.as_deref())?);
-    if matches!(cli.command,Some(Command::Check)) {println!("configuration valid");return Ok(());}
+    if matches!(cli.command,Some(Command::Check)) {
+        match cfg.role {
+            Role::Client => { tls::connector(&cfg)?; }
+            Role::Relay => { tls::acceptor(&cfg)?; tls::connector(&cfg)?; }
+            Role::Exit => { tls::acceptor(&cfg)?; }
+        }
+        println!("configuration and TLS material valid");
+        return Ok(());
+    }
     match cfg.role {
         Role::Client=>client::run(cfg).await,
         Role::Relay|Role::Exit=>server::run(cfg).await,

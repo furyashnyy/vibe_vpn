@@ -1,59 +1,72 @@
 # Rustine / Vibe VPN
 
-**Two-hop authenticated TLS tunnel** · Rust 2024 · Linux / Docker
+**Two-hop authenticated TLS proxy** · Rust 2024 · Linux / Docker
 
+```text
+SOCKS5 / HTTP CONNECT          TLS 1.3 + AEAD                 TLS 1.3 + AEAD
+  Client :1080  ─────────────► RU_RELAY :8443 ─────────────► FOREIGN_EXIT :8443 ──► Internet
+                  PSK: relay                   PSK: exit
 ```
-SOCKS5 or HTTP CONNECT       TLS 1.3 + ChaCha20-Poly1305         TLS 1.3 + AEAD
-       client  ────────────────────────►  RU_RELAY  ───────────────────►  FOREIGN_EXIT ──► Internet
-       :1080                          :8443                          :8443
+
+A small, independently configured TCP tunnel. Each hop uses **real TLS 1.3**, validates a privately issued certificate and performs challenge-response authentication before exchanging ChaCha20-Poly1305 frames. Relay and exit **must have different secrets**; clients never receive the exit secret. By default, the exit refuses private/reserved destinations, and the client binds only to loopback.
+
+## Install · systemd
+
+On both VPSs, use a reviewed checkout (Debian/Ubuntu):
+
+```bash
+ git clone https://github.com/furyashnyy/vibe_vpn.git
+ cd vibe_vpn
+ sudo bash install.sh
 ```
 
-Rustine provides end-to-end routing through a relay (the relay terminates and re-encrypts each hop). Traffic uses **real TLS 1.3**, authenticated with private CA certificates and an additional shared-secret HMAC challenge. Randomized padding sits inside encrypted frames. The exit resolves destinations, and rejects private/reserved IPs by default.
-
-## Run
-
-1. On **FOREIGN_EXIT**, run `sudo bash install.sh`, choose `exit`, set a DNS name for its certificate. Copy `/etc/rustine/tls/server/ca.pem` securely to RU_RELAY.
-2. On **RU_RELAY**, run the same installer, choose `relay`, enter the exit address, its certificate DNS name and the copied CA PEM. **Use the same strong password on both servers** (`sudo cat /etc/rustine/password` on the first server to retrieve a generated one). Copy the relay CA PEM securely to the client.
-3. On the client, set `RUSTINE_PASSWORD` (or `RUSTINE_PASSWORD_FILE`), adapt `configs/client.example.toml` and run:
+1. **FOREIGN_EXIT:** choose `exit`; the installer generates a certificate and an exit secret. Securely copy `/etc/rustine/tls/server/ca.pem` and the generated exit secret to the RU relay administrator.
+2. **RU_RELAY:** choose `relay`; provide exit address, exact exit certificate hostname (SNI), copied CA, **its exit secret**, and a **different** incoming client secret. Securely copy its `ca.pem` and incoming secret to your client.
+3. **Client:** configure `configs/client.example.toml`; set `RUSTINE_PASSWORD_FILE` or `RUSTINE_PASSWORD` to the **relay** secret, then run:
 
 ```bash
 cargo run --release -- --config configs/client.example.toml
 curl --socks5-hostname 127.0.0.1:1080 https://example.com
 ```
 
-Both server roles also run with Compose on separate VPSs. Set `.env` from `.env.example`, generate the TLS identities (`scripts/make-certs.sh exit.example.net tls/exit` and `scripts/make-certs.sh relay.example.net tls/relay`), copy `tls/exit/ca.pem` to `tls/exit-ca.pem` on relay, write `secrets/password` on each host, and grant container UID/GID `10001` read access to the private keys and secret:
+The installer supports `--upgrade` (keeps config) and `--uninstall` (removes local keys and service). It deliberately does **not** enable UFW globally. The `--upgrade` timer is opt-in; review release provenance before enabling unattended updates.
+
+## Docker Compose
+
+Use **separate hosts** and `.env` based on `.env.example`. Generate each host's certificate with `scripts/make-certs.sh <your-hostname> tls/<role>`. The exit keeps `secrets/exit-password`. The relay needs both its distinct `secrets/relay-password` and the exit's `secrets/exit-password`, plus a copy of the exit CA at `tls/exit-ca.pem`. Do **not** copy the CA private key. Grant runtime container GID 10001 access to certificates and secrets:
 
 ```bash
-sudo chgrp -R 10001 tls secrets && sudo chmod 750 tls tls/exit tls/relay secrets
-sudo chmod 640 tls/*/key.pem secrets/password
+sudo chgrp -R 10001 tls secrets
+sudo chmod 750 tls secrets tls/*/
+sudo chmod 640 tls/*/key.pem secrets/*
 # Foreign VPS:
 docker compose --profile foreign up -d --build
 # RU VPS:
 docker compose --profile ru up -d --build
 ```
 
-Installer supports `curl -fsSL https://raw.githubusercontent.com/furyashnyy/vibe_vpn/main/install.sh | sudo bash` (**review the script first**), `sudo bash install.sh --upgrade`, and `sudo bash install.sh --uninstall`. It uses systemd and does not enable UFW globally. Install via repository checkout for a version-controlled deployment.
+Only the matching profile is started on each VPS. The default exit egress policy denies loopback/private/reserved IPs. `ALLOW_PRIVATE_TARGETS=true` is intended **only** for isolated testing.
 
-## Tests (VPS, no GitHub Actions)
+## Tests · no GitHub Actions
 
 ```bash
 git pull
 bash scripts/test.sh
-# Or the basic command (does not reliably propagate the tester's exit code):
+# Direct Compose invocation (unlike test.sh, may not propagate tester exit status):
 docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
 ```
 
-Tests cover AEAD/key derivation/framing, `client → relay → exit → httpbin`, HTTP CONNECT, and a PCAP TLS/SNI smoke check. Results: `reports/report.txt`, individual logs, `reports/test.pcap`. `scripts/test.sh` uses `--exit-code-from tester` to guarantee a nonzero result on test failure.
+Tests: crypto/framing, split-TCP PCAP parser, two-hop SOCKS5 and HTTP CONNECT, wrong-password denial, invalid certificate rejection, unsupported SNI spoof rejection and structural TLS/SNI PCAP inspection. The report is `reports/report.txt`; detailed logs and capture are saved beside it. `scripts/test.sh` uses `--exit-code-from tester`, yielding nonzero exit on a failing test.
 
-## Status / limitations
+## Scope
 
 | Capability | Status |
-|---|---|
-| TCP, SOCKS5, HTTP CONNECT, TLS 1.3, AEAD, 2-hop relay | Implemented; compilation/integration must be verified on a Rust/Docker host |
-| Configurable SNI | **Only with a certificate trusted by the client** |
-| Random encrypted frame padding, optional jitter | Implemented; not a DPI bypass guarantee |
-| Fake ClientHello / invalid TCP sequence | **TODO** — explicitly rejected, never silently enabled |
-| QUIC, TLS-in-TLS fingerprint defenses, active probing responses | **TODO** |
-| Direct bypass of IP-based whitelists / arbitrary third-party SNI | **Not guaranteed**; needs real permitted routing and network testing |
+| --- | --- |
+| SOCKS5, HTTP CONNECT, TCP relay, TLS 1.3, AEAD | Implemented; end-to-end Docker verification pending |
+| Separate hop secrets, trusted CA, client loopback guard | Implemented |
+| Configurable SNI | Must match a certificate the caller trusts |
+| Encrypted padding, optional jitter | Implemented, **not** an anti-DPI guarantee |
+| Forged ClientHello / false TCP sequence, QUIC | **TODO**; forged packet flag is rejected |
+| Whitelist/IP blocking bypass | Not guaranteed; both physical links must be reachable |
 
-**Security:** No public proxy listener on the client by default. Do not commit passwords or CA private keys; rotate certificates and secrets on compromise. Avoid claims of resistance to sophisticated traffic analysis without independent measurements. This is an MVP, not a security-audited VPN.
+**Security note:** A relay terminates the first TLS+AEAD hop and can inspect forwarded data. The project has not received an external security audit. Never commit secrets or CA private keys. A TLS packet smoke test cannot demonstrate resistance to active probing or sophisticated traffic analysis.

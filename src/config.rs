@@ -19,6 +19,9 @@ pub struct Config {
     pub ca_path: Option<PathBuf>,
     // Never log Config via Debug: it may contain a secret.
     pub password: Option<String>,
+    /// Relay-to-exit PSK. Must differ from the client-to-relay PSK.
+    pub upstream_password: Option<String>,
+    pub allow_remote_clients: bool,
     pub max_padding: usize,
     pub jitter_ms: u64,
     pub allow_private_targets: bool,
@@ -32,6 +35,7 @@ impl Default for Config {
             role: Role::Client, listen: "127.0.0.1:1080".into(),
             relay_addr: None, next_hop: None, sni: None,
             cert_path: None, key_path: None, ca_path: None, password: None,
+            upstream_password: None, allow_remote_clients: false,
             max_padding: 256, jitter_ms: 0, allow_private_targets: false,
             sni_spoofing: false, connect_timeout_secs: 10,
         }
@@ -55,6 +59,7 @@ impl Config {
         set_string!("RUSTINE_NEXT_HOP", next_hop);
         set_string!("RUSTINE_SNI", sni);
         set_string!("RUSTINE_PASSWORD", password);
+        set_string!("RUSTINE_UPSTREAM_PASSWORD", upstream_password);
         for (env_name, slot) in [
             ("RUSTINE_CERT_PATH", &mut s.cert_path),
             ("RUSTINE_KEY_PATH", &mut s.key_path),
@@ -63,11 +68,15 @@ impl Config {
             if let Ok(v) = env::var(env_name) { *slot = Some(PathBuf::from(v)); }
         }
         if let Ok(v) = env::var("RUSTINE_PASSWORD_FILE") {
-            s.password = Some(fs::read_to_string(&v).with_context(|| format!("reading secret file {v}"))?.trim_end_matches(&['\r', '\n'][..]).to_string());
+            s.password = Some(read_secret(&v)?);
+        }
+        if let Ok(v) = env::var("RUSTINE_UPSTREAM_PASSWORD_FILE") {
+            s.upstream_password = Some(read_secret(&v)?);
         }
         if let Ok(v) = env::var("RUSTINE_MAX_PADDING") { s.max_padding = v.parse()?; }
         if let Ok(v) = env::var("RUSTINE_JITTER_MS") { s.jitter_ms = v.parse()?; }
         if let Ok(v) = env::var("RUSTINE_ALLOW_PRIVATE_TARGETS") { s.allow_private_targets = parse_bool(&v)?; }
+        if let Ok(v) = env::var("RUSTINE_ALLOW_REMOTE_CLIENTS") { s.allow_remote_clients = parse_bool(&v)?; }
         if let Ok(v) = env::var("RUSTINE_SNI_SPOOFING") { s.sni_spoofing = parse_bool(&v)?; }
         if let Ok(v) = env::var("RUSTINE_CONNECT_TIMEOUT_SECS") { s.connect_timeout_secs = v.parse()?; }
         s.validate()?;
@@ -76,8 +85,26 @@ impl Config {
 
     pub fn secret(&self) -> &str { self.password.as_deref().expect("validated config") }
 
+    pub fn outgoing_secret(&self) -> &str {
+        match self.role {
+            Role::Relay => self.upstream_password.as_deref().expect("validated relay upstream password"),
+            _ => self.secret(),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(self.password.as_deref().unwrap_or("").len() >= 16, "password must contain at least 16 bytes; prefer 32 random bytes");
+        if self.role == Role::Relay {
+            let outbound = self.upstream_password.as_deref().unwrap_or("");
+            ensure!(outbound.len() >= 16, "relay requires upstream_password with at least 16 bytes");
+            ensure!(outbound != self.secret(), "relay upstream_password must differ from incoming password");
+        }
+        if self.role == Role::Client && !self.allow_remote_clients {
+            let addr: std::net::SocketAddr = self.listen.parse()
+                .context("client listen must be an IP:port socket address")?;
+            ensure!(addr.ip().is_loopback(),
+                "refusing non-loopback client proxy listener; set allow_remote_clients=true to permit LAN clients");
+        }
         ensure!(self.max_padding <= 4096, "max_padding must be <= 4096");
         ensure!(self.jitter_ms <= 2000, "jitter_ms must be <= 2000");
         ensure!((1..=60).contains(&self.connect_timeout_secs), "connect_timeout_secs must be 1..60");
@@ -99,6 +126,10 @@ fn required<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
 fn required_path<'a>(value: &'a Option<PathBuf>, name: &str) -> Result<&'a Path> {
     value.as_deref().with_context(|| format!("missing {name}"))
 }
+fn read_secret(path: &str) -> Result<String> {
+    Ok(fs::read_to_string(path).with_context(|| format!("reading secret file {path}"))?
+        .trim_end_matches(&['\r', '\n'][..]).to_owned())
+}
 fn parse_bool(value: &str) -> Result<bool> {
     match value.to_ascii_lowercase().as_str() {
         "1"|"true"|"yes"|"y" => Ok(true), "0"|"false"|"no"|"n" => Ok(false), _ => bail!("invalid boolean: {value}"),
@@ -113,4 +144,30 @@ mod tests {
         assert!(c.validate().unwrap_err().to_string().contains("unsupported"));
     }
     #[test] fn default_private_access_is_off() { assert!(!Config::default().allow_private_targets); }
+    #[test] fn client_cannot_expose_unauthenticated_proxy_by_accident() {
+        let mut c = Config::default();
+        c.password = Some("a-long-test-secret-123456".into());
+        c.relay_addr = Some("127.0.0.1:8443".into());
+        c.sni = Some("relay.test".into());
+        c.ca_path = Some("not-checked-yet".into());
+        c.listen = "0.0.0.0:1080".into();
+        assert!(c.validate().unwrap_err().to_string().contains("non-loopback"));
+        c.allow_remote_clients = true;
+        assert!(c.validate().is_ok());
+    }
+    #[test] fn relay_requires_distinct_upstream_secret() {
+        let mut c = Config::default();
+        c.role = Role::Relay;
+        c.password = Some("a-long-test-secret-123456".into());
+        c.next_hop = Some("exit:8443".into());
+        c.sni = Some("exit.test".into());
+        c.ca_path = Some("unused".into());
+        c.cert_path = Some("unused".into());
+        c.key_path = Some("unused".into());
+        assert!(c.validate().unwrap_err().to_string().contains("upstream_password"));
+        c.upstream_password = c.password.clone();
+        assert!(c.validate().unwrap_err().to_string().contains("must differ"));
+        c.upstream_password = Some("distinct-upstream-secret-123".into());
+        assert!(c.validate().is_ok());
+    }
 }

@@ -95,5 +95,47 @@ mod tests {
         let mut w=Writer::new(left,&[1u8;32],0,0); let mut r=Reader::new(right,&[2u8;32]);
         let (x,y)=tokio::join!(w.send(Kind::End,b""),r.recv()); x.unwrap(); assert!(y.is_err());
     }
-    #[test] fn connect_roundtrip() { let b=encode_target("example.com",443).unwrap(); assert_eq!(decode_target(&b).unwrap(),("example.com".into(),443)); }
+    #[test] fn connect_roundtrip() {
+        let b=encode_target("example.com",443).unwrap();
+        assert_eq!(decode_target(&b).unwrap(),("example.com".into(),443));
+        assert!(encode_target("example.com",0).is_err());
+        assert!(encode_target("bad\nname",443).is_err());
+        assert!(decode_target(&b[..b.len()-1]).is_err());
+    }
+    #[tokio::test] async fn ciphertext_tampering_fails() {
+        let (tx,rx) = tokio::io::duplex(4096);
+        let mut w = Writer::new(tx,&[1u8;32],0,0);
+        let mut raw = vec![0u8;32];
+        let (sent,received) = tokio::join!(w.send(Kind::Data,b"hello"),async move {
+            let mut r=rx;
+            r.read_exact(&mut raw[..2]).await.unwrap();
+            let n = u16::from_be_bytes([raw[0],raw[1]]) as usize;
+            r.read_exact(&mut raw[2..n+2]).await.unwrap();
+            raw.truncate(n+2);
+            raw[5] ^= 0x80;
+            raw
+        });
+        sent.unwrap();
+        let (mut a, b) = tokio::io::duplex(4096);
+        let mut reader=Reader::new(b,&[1u8;32]);
+        let (written,decoded) = tokio::join!(a.write_all(&received),reader.recv());
+        written.unwrap();
+        assert!(decoded.unwrap_err().to_string().contains("AEAD"));
+    }
+    #[tokio::test] async fn independent_frames_in_one_stream() {
+        let (left,right)=tokio::io::duplex(65536);
+        let mut writer=Writer::new(left,&[77u8;32],20,0);
+        let mut reader=Reader::new(right,&[77u8;32]);
+        let (send,receive)=tokio::join!(async {
+            writer.send(Kind::Data,b"first").await.unwrap();
+            writer.send(Kind::End,&[]).await.unwrap();
+        },async {
+            let a=reader.recv().await.unwrap();
+            let b=reader.recv().await.unwrap();
+            (a,b)
+        });
+        let _=send;
+        assert_eq!(receive.0.data,b"first");
+        assert_eq!(receive.1.kind,Kind::End);
+    }
 }

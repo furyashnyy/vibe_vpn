@@ -5,6 +5,8 @@ sni = "exit.example.net" # outbound TLS hostname must match exit certificate
 ca_path = "./tls/exit-ca.pem"
 cert_path = "./tls/relay/cert.pem"
 key_path = "./tls/relay/key.pem"
+# Incoming secret: RUSTINE_PASSWORD_FILE; exit secret: RUSTINE_UPSTREAM_PASSWORD_FILE
+# Use distinct values for the two credentials.
 max_padding = 256
 jitter_ms = 0
 sni_spoofing = false

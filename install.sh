@@ -8,6 +8,12 @@ PREFIX=/etc/rustine
 MODE="${1:-install}"
 log() { printf '[rustine] %s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
+ask_secret() {
+  local __name="$1" prompt="$2" answer=''
+  read -r -s -p "$prompt: " answer < /dev/tty || die 'interactive tty unavailable'
+  printf '\n' > /dev/tty
+  printf -v "$__name" '%s' "$answer"
+}
 ask() { local __name="$1" prompt="$2" default="${3:-}" answer='';
   if [[ -n "$default" ]]; then
     read -r -p "$prompt [$default]: " answer < /dev/tty || die 'interactive tty unavailable'
@@ -112,9 +118,15 @@ ask PORT 'Порт текущего сервера' 8443
 [[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT>=1 && PORT<=65535)) || die 'invalid TCP port'
 ask SNI 'SNI (DNS-имя ВАШЕГО TLS-сервера)' "${ROLE}.example.net"
 [[ "$SNI" =~ ^[a-zA-Z0-9.-]+$ ]] || die 'invalid SNI hostname'
-ask PASSWORD 'Пароль/UUID (Enter = сгенерировать случайный секрет)' ''
+ask_secret PASSWORD 'Секрет для входящих соединений (Enter = сгенерировать)'
 if [[ -z "$PASSWORD" ]]; then PASSWORD="$(openssl rand -base64 36 | tr -d '\n')"; fi
 [[ "${#PASSWORD}" -ge 16 ]] || die 'password must contain at least 16 characters'
+UPSTREAM_PASSWORD=''
+if [[ "$ROLE" == 'relay' ]]; then
+  ask_secret UPSTREAM_PASSWORD 'Секрет от exit-сервера (обязательно другой, не клиентский)'
+  [[ "${#UPSTREAM_PASSWORD}" -ge 16 ]] || die 'exit secret must contain at least 16 characters'
+  [[ "$UPSTREAM_PASSWORD" != "$PASSWORD" ]] || die 'incoming and upstream secrets must differ'
+fi
 ask SPOOF 'Включить SNI-спуфинг? [y/n]' n
 case "$SPOOF" in n|N|no|NO) ;; y|Y|yes|YES) die 'forged TCP ClientHello is not implemented: refusing to advertise nonworking feature' ;; *) die 'use y or n' ;; esac
 ask AUTO 'Включить автообновление? [y/n]' n
@@ -130,10 +142,21 @@ if [[ "$ROLE" == 'relay' ]]; then
   install -o root -g rustine -m 0640 "$EXIT_CA" "$PREFIX/tls/exit-ca.pem"
 fi
 printf '%s\n' "$PASSWORD" > "$PREFIX/password"
+if [[ "$ROLE" == 'relay' ]]; then
+  printf '%s\n' "$UPSTREAM_PASSWORD" > "$PREFIX/upstream-password"
+else
+  rm -f "$PREFIX/upstream-password"
+fi
 chown root:rustine "$PREFIX" "$PREFIX/tls" "$PREFIX/tls/server" \
   "$PREFIX/password" "$PREFIX/tls/server/key.pem" "$PREFIX/tls/server/cert.pem" "$PREFIX/tls/server/ca.pem"
 chmod 0750 "$PREFIX" "$PREFIX/tls" "$PREFIX/tls/server"
 chmod 0640 "$PREFIX/password" "$PREFIX/tls/server/key.pem"
+UPSTREAM_UNIT_ENV=''
+if [[ "$ROLE" == 'relay' ]]; then
+  chown root:rustine "$PREFIX/upstream-password"
+  chmod 0640 "$PREFIX/upstream-password"
+  UPSTREAM_UNIT_ENV='Environment=RUSTINE_UPSTREAM_PASSWORD_FILE=/etc/rustine/upstream-password'
+fi
 chmod 0644 "$PREFIX/tls/server/cert.pem" "$PREFIX/tls/server/ca.pem"
 cat > "$PREFIX/config.toml" <<CONFIG
 role = "$ROLE"
@@ -153,7 +176,7 @@ CONFIG
 fi
 chown root:rustine "$PREFIX/config.toml"
 chmod 0640 "$PREFIX/config.toml"
-cat > /etc/systemd/system/rustine.service <<'UNIT'
+cat > /etc/systemd/system/rustine.service <<UNIT
 [Unit]
 Description=Rustine | Vibe VPN tunnel
 Wants=network-online.target
@@ -163,6 +186,7 @@ Type=simple
 User=rustine
 Group=rustine
 Environment=RUSTINE_PASSWORD_FILE=/etc/rustine/password
+${UPSTREAM_UNIT_ENV}
 ExecStart=/usr/local/bin/rustine --config /etc/rustine/config.toml
 Restart=on-failure
 RestartSec=3
@@ -209,6 +233,10 @@ fi
 HOST=$(hostname -I 2>/dev/null | awk '{print $1}')
 log "Role: $ROLE | TCP port: $PORT | local certificate SNI: $SNI"
 log "Share ONLY the CA file $PREFIX/tls/server/ca.pem with the connecting peer."
-log "Connection template: rustine://<RU_RELAY_IP>:$PORT?sni=$SNI (client must trust the CA PEM and have the shared secret)."
+if [[ "$ROLE" == 'relay' ]]; then
+  log "Client: rustine --config configs/client.example.toml (relay_addr=<RU_RELAY_IP>:$PORT; sni=$SNI)"
+else
+  log 'Supply this server secret and the CA certificate securely to the relay administrator.'
+fi
 log "Local IP: ${HOST:-unknown}. Password stored root:rustine, not printed in terminal output."
 log 'Status: systemctl status rustine; logs: journalctl -u rustine -f'

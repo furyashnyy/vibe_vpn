@@ -11,7 +11,7 @@ services:
     environment:
       RUSTINE_ROLE: exit
       RUSTINE_LISTEN: 0.0.0.0:8443
-      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_PASSWORD: "test-exit-psk-32-character-secret"
       RUSTINE_CERT_PATH: /testcerts/exit/cert.pem
       RUSTINE_KEY_PATH: /testcerts/exit/key.pem
       RUSTINE_ALLOW_PRIVATE_TARGETS: "true"
@@ -31,7 +31,8 @@ services:
       RUSTINE_LISTEN: 0.0.0.0:8443
       RUSTINE_NEXT_HOP: exit:8443
       RUSTINE_SNI: exit.test
-      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_PASSWORD: "test-relay-psk-32-character-secret"
+      RUSTINE_UPSTREAM_PASSWORD: "test-exit-psk-32-character-secret"
       RUSTINE_CERT_PATH: /testcerts/relay/cert.pem
       RUSTINE_KEY_PATH: /testcerts/relay/key.pem
       RUSTINE_CA_PATH: /testcerts/exit/ca.pem
@@ -52,7 +53,7 @@ services:
       RUSTINE_LISTEN: 127.0.0.1:1080
       RUSTINE_RELAY_ADDR: relay:8443
       RUSTINE_SNI: relay.test
-      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_PASSWORD: "test-relay-psk-32-character-secret"
       RUSTINE_CA_PATH: /testcerts/relay/ca.pem
       RUSTINE_JITTER_MS: "0"
     cap_add: [NET_RAW, NET_ADMIN]

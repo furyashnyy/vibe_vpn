@@ -15,7 +15,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
 }
 pub async fn outgoing(cfg: &Config, addr: &str) -> Result<Peer<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
     let mut stream=tls::connect(cfg,addr).await?;
-    let keys=timeout(Duration::from_secs(cfg.connect_timeout_secs),crypto::authenticate(&mut stream,cfg.secret(),true))
+    let keys=timeout(Duration::from_secs(cfg.connect_timeout_secs),crypto::authenticate(&mut stream,cfg.outgoing_secret(),true))
         .await.context("peer authentication timeout")??;
     Ok(Peer::new(stream,keys,cfg))
 }
