@@ -1,0 +1,10 @@
+/target/
+/.env
+/.env.*
+!/.env.example
+/tls/
+/secrets/
+/reports/
+*.pcap
+*.key
+*.pem

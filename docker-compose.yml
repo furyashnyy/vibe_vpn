@@ -1,0 +1,57 @@
+name: rustine
+# Run on DIFFERENT hosts:
+# RU VPS:      docker compose --profile ru up -d --build
+# Foreign VPS: docker compose --profile foreign up -d --build
+services:
+  relay:
+    profiles: ["ru"]
+    build: { context: ., target: runtime }
+    restart: unless-stopped
+    environment:
+      RUSTINE_ROLE: relay
+      RUSTINE_LISTEN: "0.0.0.0:${RELAY_PORT:-8443}"
+      RUSTINE_NEXT_HOP: "${EXIT_HOST:-127.0.0.1}:${EXIT_PORT:-8443}"
+      RUSTINE_SNI: "${EXIT_SNI:-exit.example.net}"
+      RUSTINE_PASSWORD_FILE: /run/secrets/rustine_password
+      RUSTINE_CERT_PATH: /tls/relay/cert.pem
+      RUSTINE_KEY_PATH: /tls/relay/key.pem
+      RUSTINE_CA_PATH: /tls/exit-ca.pem
+      RUSTINE_MAX_PADDING: "${MAX_PADDING:-256}"
+      RUSTINE_JITTER_MS: "${JITTER_MS:-0}"
+    volumes:
+      - ./tls/relay/cert.pem:/tls/relay/cert.pem:ro
+      - ./tls/relay/key.pem:/tls/relay/key.pem:ro
+      - ./tls/exit-ca.pem:/tls/exit-ca.pem:ro
+      - ./secrets/password:/run/secrets/rustine_password:ro
+    ports: ["${RELAY_PORT:-8443}:${RELAY_PORT:-8443}/tcp"]
+    healthcheck:
+      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:${RELAY_PORT:-8443}"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  exit:
+    profiles: ["foreign"]
+    build: { context: ., target: runtime }
+    restart: unless-stopped
+    environment:
+      RUSTINE_ROLE: exit
+      RUSTINE_LISTEN: "0.0.0.0:${EXIT_PORT:-8443}"
+      RUSTINE_PASSWORD_FILE: /run/secrets/rustine_password
+      RUSTINE_CERT_PATH: /tls/exit/cert.pem
+      RUSTINE_KEY_PATH: /tls/exit/key.pem
+      RUSTINE_MAX_PADDING: "${MAX_PADDING:-256}"
+      RUSTINE_JITTER_MS: "${JITTER_MS:-0}"
+      RUSTINE_ALLOW_PRIVATE_TARGETS: "${ALLOW_PRIVATE_TARGETS:-false}"
+    volumes:
+      - ./tls/exit/cert.pem:/tls/exit/cert.pem:ro
+      - ./tls/exit/key.pem:/tls/exit/key.pem:ro
+      - ./secrets/password:/run/secrets/rustine_password:ro
+    ports: ["${EXIT_PORT:-8443}:${EXIT_PORT:-8443}/tcp"]
+    healthcheck:
+      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:${EXIT_PORT:-8443}"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

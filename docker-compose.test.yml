@@ -1,0 +1,65 @@
+name: rustine-test
+services:
+  httpbin:
+    image: python:3.12-alpine
+    command: ["python", "-m", "http.server", "8080", "--bind", "0.0.0.0", "--directory", "/site"]
+    volumes: ["./tests/site:/site:ro"]
+    networks: [testnet]
+  exit:
+    build: { context: ., target: test }
+    entrypoint: ["/usr/local/bin/rustine"]
+    environment:
+      RUSTINE_ROLE: exit
+      RUSTINE_LISTEN: 0.0.0.0:8443
+      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_CERT_PATH: /testcerts/exit/cert.pem
+      RUSTINE_KEY_PATH: /testcerts/exit/key.pem
+      RUSTINE_ALLOW_PRIVATE_TARGETS: "true"
+      RUSTINE_JITTER_MS: "0"
+    networks: [testnet]
+    depends_on: [httpbin]
+    healthcheck:
+      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:8443"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  relay:
+    build: { context: ., target: test }
+    entrypoint: ["/usr/local/bin/rustine"]
+    environment:
+      RUSTINE_ROLE: relay
+      RUSTINE_LISTEN: 0.0.0.0:8443
+      RUSTINE_NEXT_HOP: exit:8443
+      RUSTINE_SNI: exit.test
+      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_CERT_PATH: /testcerts/relay/cert.pem
+      RUSTINE_KEY_PATH: /testcerts/relay/key.pem
+      RUSTINE_CA_PATH: /testcerts/exit/ca.pem
+      RUSTINE_JITTER_MS: "0"
+    networks: [testnet]
+    depends_on:
+      exit: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "rustine", "health", "--target", "127.0.0.1:8443"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  tester:
+    build: { context: ., target: test }
+    entrypoint: ["/workspace/scripts/run-tests.sh"]
+    environment:
+      RUSTINE_ROLE: client
+      RUSTINE_LISTEN: 127.0.0.1:1080
+      RUSTINE_RELAY_ADDR: relay:8443
+      RUSTINE_SNI: relay.test
+      RUSTINE_PASSWORD: "test-only-32-character-secret-change"
+      RUSTINE_CA_PATH: /testcerts/relay/ca.pem
+      RUSTINE_JITTER_MS: "0"
+    cap_add: [NET_RAW, NET_ADMIN]
+    volumes: ["./reports:/reports"]
+    depends_on:
+      relay: { condition: service_healthy }
+    networks: [testnet]
+networks:
+  testnet:
+    internal: true

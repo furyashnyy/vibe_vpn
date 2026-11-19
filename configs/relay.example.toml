@@ -1,0 +1,10 @@
+role = "relay"
+listen = "0.0.0.0:8443"
+next_hop = "FOREIGN_EXIT_IP:8443"
+sni = "exit.example.net" # outbound TLS hostname must match exit certificate
+ca_path = "./tls/exit-ca.pem"
+cert_path = "./tls/relay/cert.pem"
+key_path = "./tls/relay/key.pem"
+max_padding = 256
+jitter_ms = 0
+sni_spoofing = false

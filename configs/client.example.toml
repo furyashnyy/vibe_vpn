@@ -1,0 +1,9 @@
+role = "client"
+listen = "127.0.0.1:1080"
+relay_addr = "RU_RELAY_IP:8443"
+sni = "relay.example.net"
+ca_path = "./tls/relay-ca.pem"
+# Password via RUSTINE_PASSWORD_FILE or RUSTINE_PASSWORD (not in this file).
+max_padding = 256
+jitter_ms = 0
+sni_spoofing = false
