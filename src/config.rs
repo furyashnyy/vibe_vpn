@@ -6,8 +6,8 @@ use std::{env, fs, path::{Path, PathBuf}};
 #[serde(rename_all = "lowercase")]
 pub enum Role { Client, Relay, Exit }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub role: Role,
     pub listen: String,
@@ -27,6 +27,10 @@ pub struct Config {
     pub allow_private_targets: bool,
     pub sni_spoofing: bool,
     pub connect_timeout_secs: u64,
+    /// Upper bound on authenticated and unauthenticated connections per server.
+    pub max_connections: usize,
+    /// Timeout between authenticated frames; zero disables idle timeout.
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -37,7 +41,7 @@ impl Default for Config {
             cert_path: None, key_path: None, ca_path: None, password: None,
             upstream_password: None, allow_remote_clients: false,
             max_padding: 256, jitter_ms: 0, allow_private_targets: false,
-            sni_spoofing: false, connect_timeout_secs: 10,
+            sni_spoofing: false, connect_timeout_secs: 10, max_connections: 256, idle_timeout_secs: 600,
         }
     }
 }
@@ -79,6 +83,8 @@ impl Config {
         if let Ok(v) = env::var("RUSTINE_ALLOW_REMOTE_CLIENTS") { s.allow_remote_clients = parse_bool(&v)?; }
         if let Ok(v) = env::var("RUSTINE_SNI_SPOOFING") { s.sni_spoofing = parse_bool(&v)?; }
         if let Ok(v) = env::var("RUSTINE_CONNECT_TIMEOUT_SECS") { s.connect_timeout_secs = v.parse()?; }
+        if let Ok(v) = env::var("RUSTINE_MAX_CONNECTIONS") { s.max_connections = v.parse()?; }
+        if let Ok(v) = env::var("RUSTINE_IDLE_TIMEOUT_SECS") { s.idle_timeout_secs = v.parse()?; }
         s.validate()?;
         Ok(s)
     }
@@ -108,6 +114,9 @@ impl Config {
         ensure!(self.max_padding <= 4096, "max_padding must be <= 4096");
         ensure!(self.jitter_ms <= 2000, "jitter_ms must be <= 2000");
         ensure!((1..=60).contains(&self.connect_timeout_secs), "connect_timeout_secs must be 1..60");
+        ensure!((1..=65535).contains(&self.max_connections), "max_connections must be 1..65535");
+        ensure!(self.idle_timeout_secs == 0 || (10..=86400).contains(&self.idle_timeout_secs),
+            "idle_timeout_secs must be 0 (disabled) or 10..86400");
         if self.sni_spoofing {
             bail!("SNI spoofing with forged TCP sequence is TODO/unsupported; no fake packets will be emitted");
         }
@@ -144,6 +153,22 @@ mod tests {
         assert!(c.validate().unwrap_err().to_string().contains("unsupported"));
     }
     #[test] fn default_private_access_is_off() { assert!(!Config::default().allow_private_targets); }
+    #[test] fn unknown_config_keys_fail_closed() {
+        let error = toml::from_str::<Config>("role = \"client\"\nallow_priavte_targets = true")
+            .err().expect("unknown config field must be rejected").to_string();
+        assert!(error.contains("unknown field"));
+    }
+    #[test] fn connections_limit_is_bounded() {
+        let mut c=Config::default();
+        c.password=Some("example-long-test-secret-0123456789".into());
+        c.relay_addr=Some("127.0.0.1:8443".into());
+        c.sni=Some("relay.test".into());
+        c.ca_path=Some("/not/checked/here".into());
+        c.max_connections=0;
+        assert!(c.validate().unwrap_err().to_string().contains("max_connections"));
+        c.max_connections=64;
+        assert!(c.validate().is_ok());
+    }
     #[test] fn client_cannot_expose_unauthenticated_proxy_by_accident() {
         let mut c = Config::default();
         c.password = Some("a-long-test-secret-123456".into());

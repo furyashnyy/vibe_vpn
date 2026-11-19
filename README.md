@@ -1,5 +1,7 @@
 # Rustine / Vibe VPN
 
+**v0.3.0** — reliability and deployment hardening.
+
 **Two-hop authenticated TLS proxy** · Rust 2024 · Linux / Docker
 
 ```text
@@ -8,7 +10,7 @@ SOCKS5 / HTTP CONNECT          TLS 1.3 + AEAD                 TLS 1.3 + AEAD
                   PSK: relay                   PSK: exit
 ```
 
-A small, independently configured TCP tunnel. Each hop uses **real TLS 1.3**, validates a privately issued certificate and performs challenge-response authentication before exchanging ChaCha20-Poly1305 frames. Relay and exit **must have different secrets**; clients never receive the exit secret. By default, the exit refuses private/reserved destinations, and the client binds only to loopback.
+A small, independently configured TCP tunnel. Each hop uses **real TLS 1.3**, validates a privately issued certificate and performs challenge-response authentication before exchanging ChaCha20-Poly1305 frames. Relay and exit **must have different secrets**; clients never receive the exit secret. By default, the exit refuses private/reserved destinations, and the client binds only to loopback. Server connections are capped at 256, and authenticated idle streams time out after 600 seconds (both configurable).
 
 ## Install · systemd
 
@@ -29,7 +31,7 @@ cargo run --release -- --config configs/client.example.toml
 curl --socks5-hostname 127.0.0.1:1080 https://example.com
 ```
 
-The installer supports `--upgrade` (keeps config) and `--uninstall` (removes local keys and service). It deliberately does **not** enable UFW globally. The `--upgrade` timer is opt-in; review release provenance before enabling unattended updates.
+The installer supports `--upgrade` (keeps config, rolls back the previous binary if service restart fails) and `--uninstall` (removes local keys and service). It deliberately does **not** enable UFW globally. The `--upgrade` timer is opt-in; review release provenance before enabling unattended updates.
 
 ## Docker Compose
 
@@ -51,12 +53,13 @@ Only the matching profile is started on each VPS. The default exit egress policy
 
 ```bash
 git pull
-bash scripts/test.sh
+bash scripts/verify.sh  # Bash/TOML/TLS/PCAP; runs without Docker
+bash scripts/test.sh    # build + integration tests; requires Docker
 # Direct Compose invocation (unlike test.sh, may not propagate tester exit status):
 docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
 ```
 
-Tests: crypto/framing, split-TCP PCAP parser, two-hop SOCKS5 and HTTP CONNECT, wrong-password denial, invalid certificate rejection, unsupported SNI spoof rejection and structural TLS/SNI PCAP inspection. The report is `reports/report.txt`; detailed logs and capture are saved beside it. `scripts/test.sh` uses `--exit-code-from tester`, yielding nonzero exit on a failing test.
+Tests: crypto/framing, split-TCP PCAP parser, two-hop SOCKS5 and HTTP CONNECT, wrong-password denial, invalid certificate rejection, unsupported SNI spoof rejection and structural TLS/SNI PCAP inspection. The Docker report is `reports/report.txt`; the offline check report is `reports/static-report.txt`. Detailed logs and capture are saved beside them. `scripts/test.sh` uses `--exit-code-from tester`, yielding nonzero exit on a failing test.
 
 ## Scope
 

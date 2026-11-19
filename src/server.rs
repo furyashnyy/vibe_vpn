@@ -1,17 +1,21 @@
 use std::{net::{IpAddr, SocketAddr}, sync::Arc};
 use anyhow::{Context, Result, bail, ensure};
-use tokio::{io::{AsyncRead,AsyncWrite,AsyncReadExt,AsyncWriteExt}, net::{TcpListener, TcpStream,lookup_host}, time::{Duration,timeout}};
+use tokio::{io::{AsyncRead,AsyncWrite,AsyncReadExt,AsyncWriteExt}, net::{TcpListener, TcpStream,lookup_host}, sync::Semaphore, time::{Duration,timeout}};
 use tracing::{info,warn};
 use crate::{config::{Config, Role}, crypto, peer::{self,Peer}, protocol::{self,Kind,Reader,Writer}, tls};
 
 pub async fn run(cfg: Arc<Config>) -> Result<()> {
     let listener=TcpListener::bind(&cfg.listen).await?;
     let acceptor=tls::acceptor(&cfg)?;
-    info!(role=?cfg.role,listen=%cfg.listen,"server ready");
+    let slots=Arc::new(Semaphore::new(cfg.max_connections));
+    info!(role=?cfg.role,listen=%cfg.listen,max_connections=cfg.max_connections,"server ready");
     loop {
+        // Acquire BEFORE accept: bounded task count even under unauthenticated floods.
+        let permit=slots.clone().acquire_owned().await?;
         let (socket,peer_addr)=listener.accept().await?;
         let acceptor=acceptor.clone(); let cfg=cfg.clone();
         tokio::spawn(async move {
+            let _permit=permit;
             let result=async {
                 let mut stream=timeout(Duration::from_secs(cfg.connect_timeout_secs),acceptor.accept(socket)).await.context("incoming TLS timeout")??;
                 let keys=timeout(Duration::from_secs(cfg.connect_timeout_secs),crypto::authenticate(&mut stream,cfg.secret(),false)).await.context("incoming auth timeout")??;
@@ -28,7 +32,8 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
 }
 
 async fn serve_relay<S:AsyncRead+AsyncWrite+Unpin>(mut incoming:Peer<S>,cfg:&Config)->Result<()> {
-    let request=incoming.rx.recv().await?;
+    let request=timeout(Duration::from_secs(cfg.connect_timeout_secs),incoming.rx.recv())
+        .await.context("CONNECT request timeout")??;
     ensure!(request.kind==Kind::Connect,"expected CONNECT");
     // Relay never connects to the requested destination; it connects only to the pinned EXIT.
     let addr=cfg.next_hop.as_deref().context("next_hop required")?;
@@ -36,7 +41,8 @@ async fn serve_relay<S:AsyncRead+AsyncWrite+Unpin>(mut incoming:Peer<S>,cfg:&Con
         Ok(p)=>p, Err(e)=>{let _=incoming.tx.send(Kind::Error,b"exit unavailable").await; return Err(e);}
     };
     upstream.tx.send(Kind::Connect,&request.data).await?;
-    let response=upstream.rx.recv().await?;
+    let response=timeout(Duration::from_secs(cfg.connect_timeout_secs),upstream.rx.recv())
+        .await.context("upstream CONNECT response timeout")??;
     incoming.tx.send(response.kind,&response.data).await?;
     if response.kind!=Kind::Ok {return Ok(());}
     tokio::try_join!(forward(&mut incoming.rx,&mut upstream.tx),forward(&mut upstream.rx,&mut incoming.tx))?;
@@ -46,7 +52,8 @@ async fn forward<R:AsyncRead+Unpin,W:AsyncWrite+Unpin>(reader:&mut Reader<R>,wri
     loop { let frame=reader.recv().await?; writer.send(frame.kind,&frame.data).await?; if frame.kind==Kind::End || frame.kind==Kind::Error { return Ok(()); } }
 }
 async fn serve_exit<S:AsyncRead+AsyncWrite+Unpin>(mut incoming:Peer<S>,cfg:&Config)->Result<()> {
-    let request=incoming.rx.recv().await?;
+    let request=timeout(Duration::from_secs(cfg.connect_timeout_secs),incoming.rx.recv())
+        .await.context("CONNECT request timeout")??;
     ensure!(request.kind==Kind::Connect,"expected CONNECT");
     let (host,port)=protocol::decode_target(&request.data)?;
     let stream=match connect_destination(&host,port,cfg).await {
@@ -117,5 +124,14 @@ fn is_public(addr:IpAddr)->bool {
         assert!(!is_public(IpAddr::V4("10.0.0.4".parse().unwrap())));
         assert!(!is_public(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
         assert!(is_public(IpAddr::V4("1.1.1.1".parse().unwrap())));
+    }
+
+    #[tokio::test]
+    async fn idle_post_auth_peer_cannot_hold_slot_forever() {
+        let (server_stream, _client_stream) = tokio::io::duplex(64);
+        let cfg=Config { role: Role::Exit, connect_timeout_secs: 1, ..Config::default() };
+        let peer=Peer::new(server_stream, crypto::Keys { send: [3u8; 32], recv: [4u8; 32] }, &cfg);
+        let error=serve_exit(peer,&cfg).await.err().expect("CONNECT should time out");
+        assert!(format!("{error:#}").contains("CONNECT request timeout"));
     }
 }

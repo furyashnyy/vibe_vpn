@@ -5,6 +5,7 @@ sni = "relay.example.net"
 ca_path = "./tls/relay-ca.pem"
 # Password via RUSTINE_PASSWORD_FILE or RUSTINE_PASSWORD (not in this file).
 # Set RUSTINE_ALLOW_REMOTE_CLIENTS=true only if intentionally exposing a LAN proxy.
+idle_timeout_secs = 600
 max_padding = 256
 jitter_ms = 0
 sni_spoofing = false

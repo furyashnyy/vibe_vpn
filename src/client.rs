@@ -16,15 +16,18 @@ pub async fn run(cfg:Arc<Config>)->Result<()> {
     }
 }
 async fn handle(mut local:TcpStream,cfg:&Config)->Result<()> {
-    let mut peek=[0u8;1]; local.peek(&mut peek).await?;
+    let mut peek=[0u8;1];
+    tokio::time::timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs),local.peek(&mut peek)).await??;
     let socks=peek[0]==5;
-    let (host,port)=if socks {parse_socks5(&mut local).await?} else {parse_http_connect(&mut local).await?};
+    let (host,port)=tokio::time::timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs),async {
+        if socks {parse_socks5(&mut local).await} else {parse_http_connect(&mut local).await}
+    }).await.context("local proxy request timeout")??;
     let addr=cfg.relay_addr.as_deref().context("relay_addr missing")?;
     let mut peer=match peer::outgoing(cfg,addr).await {
         Ok(p)=>p,Err(e)=>{report_connect_error(&mut local,socks).await;return Err(e);}
     };
     peer.tx.send(Kind::Connect,&protocol::encode_target(&host,port)?).await?;
-    let response=peer.rx.recv().await?;
+    let response=tokio::time::timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs),peer.rx.recv()).await??;
     if response.kind!=Kind::Ok {report_connect_error(&mut local,socks).await;bail!("exit denied CONNECT");}
     if socks {local.write_all(&[5,0,0,1,0,0,0,0,0,0]).await?;}
     else {local.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;}

@@ -1,4 +1,5 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use tokio::time::{timeout,Duration};
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce, aead::Aead};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::obfuscation;
@@ -18,11 +19,20 @@ fn nonce_for(counter: u64) -> [u8; 12] {
     let mut nonce = [0u8;12]; nonce[4..].copy_from_slice(&counter.to_be_bytes()); nonce
 }
 
-pub struct Reader<R> { inner: R, cipher: ChaCha20Poly1305, counter: u64 }
+pub struct Reader<R> { inner: R, cipher: ChaCha20Poly1305, counter: u64, idle_timeout_secs: u64 }
 pub struct Writer<W> { inner: W, cipher: ChaCha20Poly1305, counter: u64, max_padding: usize, jitter_ms: u64 }
 impl<R: AsyncRead + Unpin> Reader<R> {
-    pub fn new(inner: R, key: &[u8;32]) -> Self { Self { inner, cipher: ChaCha20Poly1305::new(Key::from_slice(key)), counter: 0 } }
+    pub fn new(inner: R, key: &[u8;32]) -> Self { Self { inner, cipher: ChaCha20Poly1305::new(Key::from_slice(key)), counter: 0, idle_timeout_secs: 0 } }
+    pub fn with_idle_timeout(mut self, seconds: u64) -> Self {
+        self.idle_timeout_secs = seconds;
+        self
+    }
     pub async fn recv(&mut self) -> Result<Frame> {
+        if self.idle_timeout_secs == 0 { return self.recv_inner().await; }
+        timeout(Duration::from_secs(self.idle_timeout_secs), self.recv_inner())
+            .await.context("authenticated frame idle timeout")?
+    }
+    async fn recv_inner(&mut self) -> Result<Frame> {
         let wire_len = self.inner.read_u16().await? as usize;
         ensure!((19..=MAX_CIPHERTEXT).contains(&wire_len), "frame length invalid");
         let mut ciphertext = vec![0u8; wire_len];
@@ -121,6 +131,12 @@ mod tests {
         let (written,decoded) = tokio::join!(a.write_all(&received),reader.recv());
         written.unwrap();
         assert!(decoded.unwrap_err().to_string().contains("AEAD"));
+    }
+    #[tokio::test] async fn idle_timeout_closes_stalled_frame() {
+        let (_tx, rx)=tokio::io::duplex(64);
+        let mut reader=Reader::new(rx,&[5u8;32]).with_idle_timeout(1);
+        let err=reader.recv().await.err().expect("idle frame must fail");
+        assert!(format!("{err:#}").contains("idle timeout"));
     }
     #[tokio::test] async fn independent_frames_in_one_stream() {
         let (left,right)=tokio::io::duplex(65536);

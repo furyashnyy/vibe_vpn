@@ -10,7 +10,7 @@ pub struct Peer<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Peer<S> {
     pub fn new(stream: S, keys: crypto::Keys, cfg: &Config) -> Self {
         let (r,w)=tokio::io::split(stream);
-        Self { rx:Reader::new(r,&keys.recv), tx:Writer::new(w,&keys.send,cfg.max_padding,cfg.jitter_ms) }
+        Self { rx:Reader::new(r,&keys.recv).with_idle_timeout(cfg.idle_timeout_secs), tx:Writer::new(w,&keys.send,cfg.max_padding,cfg.jitter_ms) }
     }
 }
 pub async fn outgoing(cfg: &Config, addr: &str) -> Result<Peer<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {

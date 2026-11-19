@@ -17,6 +17,8 @@ services:
       RUSTINE_CERT_PATH: /tls/relay/cert.pem
       RUSTINE_KEY_PATH: /tls/relay/key.pem
       RUSTINE_CA_PATH: /tls/exit-ca.pem
+      RUSTINE_MAX_CONNECTIONS: "${MAX_CONNECTIONS:-256}"
+      RUSTINE_IDLE_TIMEOUT_SECS: "${IDLE_TIMEOUT_SECS:-600}"
       RUSTINE_MAX_PADDING: "${MAX_PADDING:-256}"
       RUSTINE_JITTER_MS: "${JITTER_MS:-0}"
     volumes:
@@ -43,6 +45,8 @@ services:
       RUSTINE_PASSWORD_FILE: /run/secrets/exit_password
       RUSTINE_CERT_PATH: /tls/exit/cert.pem
       RUSTINE_KEY_PATH: /tls/exit/key.pem
+      RUSTINE_MAX_CONNECTIONS: "${MAX_CONNECTIONS:-256}"
+      RUSTINE_IDLE_TIMEOUT_SECS: "${IDLE_TIMEOUT_SECS:-600}"
       RUSTINE_MAX_PADDING: "${MAX_PADDING:-256}"
       RUSTINE_JITTER_MS: "${JITTER_MS:-0}"
       RUSTINE_ALLOW_PRIVATE_TARGETS: "${ALLOW_PRIVATE_TARGETS:-false}"

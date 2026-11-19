@@ -92,11 +92,31 @@ install_binary() {
   install -o root -g root -m 0755 "$SRC/target/release/rustine" /usr/local/bin/rustine
 }
 source_checkout
+# Preserve the old binary for a transactional service rollback during upgrades.
+PREV_BIN="$TMP/previous-rustine"
+if [[ "$MODE" == '--upgrade' && -x /usr/local/bin/rustine ]]; then
+  cp /usr/local/bin/rustine "$PREV_BIN"
+fi
 install_binary
+if ! /usr/local/bin/rustine --version >/dev/null 2>&1; then
+  if [[ -s "$PREV_BIN" ]]; then
+    install -o root -g root -m 0755 "$PREV_BIN" /usr/local/bin/rustine
+  fi
+  die 'installed binary cannot execute; previous binary restored if available'
+fi
 mkdir -p /usr/local/lib/rustine
 install -o root -g root -m 0755 "$SRC/install.sh" /usr/local/lib/rustine/install.sh
 if [[ "$MODE" == '--upgrade' ]]; then
-  systemctl try-restart rustine.service || true
+  if systemctl is-active --quiet rustine.service; then
+    if ! systemctl restart rustine.service || ! systemctl is-active --quiet rustine.service; then
+      log 'Upgrade failed; restoring previous binary.'
+      if [[ -s "$PREV_BIN" ]]; then
+        install -o root -g root -m 0755 "$PREV_BIN" /usr/local/bin/rustine
+        systemctl restart rustine.service || true
+      fi
+      die 'failed to upgrade running service'
+    fi
+  fi
   log 'Upgrade complete; configuration unchanged.'
   exit 0
 fi
@@ -133,10 +153,18 @@ ask AUTO 'Включить автообновление? [y/n]' n
 [[ "$AUTO" =~ ^(y|Y|yes|YES|n|N|no|NO)$ ]] || die 'use y or n'
 mkdir -p "$PREFIX/tls/server"
 chmod 0750 "$PREFIX" "$PREFIX/tls" "$PREFIX/tls/server"
-if [[ ! -s "$PREFIX/tls/server/cert.pem" || ! -s "$PREFIX/tls/server/key.pem" ]]; then
-  "$SRC/scripts/make-certs.sh" "$SNI" "$PREFIX/tls/server"
+if [[ -s "$PREFIX/tls/server/cert.pem" && -s "$PREFIX/tls/server/key.pem" && -s "$PREFIX/tls/server/ca.pem" ]]; then
+  # Never reuse an existing certificate for a different hostname.
+  openssl x509 -in "$PREFIX/tls/server/cert.pem" -noout -checkhost "$SNI" >/dev/null \
+    || die "existing TLS certificate does not cover SNI=$SNI; rotate certificates deliberately"
+  openssl verify -CAfile "$PREFIX/tls/server/ca.pem" "$PREFIX/tls/server/cert.pem" >/dev/null \
+    || die 'existing TLS certificate is expired or not signed by the local CA'
+  log 'Existing TLS identity preserved; SAN and trust verified.'
 else
-  log 'Existing TLS certificate preserved. Ensure its SAN matches the selected SNI.'
+  # Incomplete identity? Fail rather than overwriting an existing private CA.
+  [[ ! -e "$PREFIX/tls/server/key.pem" && ! -e "$PREFIX/tls/server/cert.pem" && ! -e "$PREFIX/tls/server/ca.pem" ]] \
+    || die 'partial TLS identity found; fix or back up the directory before reinstalling'
+  "$SRC/scripts/make-certs.sh" "$SNI" "$PREFIX/tls/server"
 fi
 if [[ "$ROLE" == 'relay' ]]; then
   install -o root -g rustine -m 0640 "$EXIT_CA" "$PREFIX/tls/exit-ca.pem"
@@ -164,6 +192,8 @@ listen = "0.0.0.0:$PORT"
 cert_path = "$PREFIX/tls/server/cert.pem"
 key_path = "$PREFIX/tls/server/key.pem"
 max_padding = 256
+max_connections = 256
+idle_timeout_secs = 600
 jitter_ms = 0
 sni_spoofing = false
 CONFIG
@@ -217,8 +247,17 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
+if [[ "$ROLE" == 'relay' ]]; then
+  VALIDATE_ENV=("RUSTINE_PASSWORD_FILE=$PREFIX/password" "RUSTINE_UPSTREAM_PASSWORD_FILE=$PREFIX/upstream-password")
+else
+  VALIDATE_ENV=("RUSTINE_PASSWORD_FILE=$PREFIX/password")
+fi
+if ! env "${VALIDATE_ENV[@]}" /usr/local/bin/rustine --config "$PREFIX/config.toml" check; then
+  die 'configuration and TLS material validation failed; service was NOT restarted'
+fi
 systemctl daemon-reload
-systemctl enable --now rustine.service
+systemctl enable rustine.service >/dev/null
+systemctl restart rustine.service
 if [[ "$AUTO" =~ ^(y|Y|yes|YES)$ ]]; then
   systemctl enable --now rustine-update.timer
 else

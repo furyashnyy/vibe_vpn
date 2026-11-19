@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.88-bookworm AS build
+FROM rust:bookworm AS build
 WORKDIR /build
 COPY Cargo.toml ./
 COPY src ./src
@@ -15,7 +15,7 @@ EXPOSE 8443/tcp
 ENTRYPOINT ["/usr/local/bin/rustine"]
 
 # Test stage is intentionally separate from the minimal production runtime.
-FROM rust:1.88-bookworm AS test
+FROM rust:bookworm AS test
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl python3 openssl tcpdump ca-certificates \

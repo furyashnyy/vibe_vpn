@@ -7,6 +7,8 @@ cert_path = "./tls/relay/cert.pem"
 key_path = "./tls/relay/key.pem"
 # Incoming secret: RUSTINE_PASSWORD_FILE; exit secret: RUSTINE_UPSTREAM_PASSWORD_FILE
 # Use distinct values for the two credentials.
+max_connections = 256
+idle_timeout_secs = 600
 max_padding = 256
 jitter_ms = 0
 sni_spoofing = false
