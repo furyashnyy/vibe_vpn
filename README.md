@@ -13,7 +13,7 @@ Rustine provides end-to-end routing through a relay (the relay terminates and re
 ## Run
 
 1. On **FOREIGN_EXIT**, run `sudo bash install.sh`, choose `exit`, set a DNS name for its certificate. Copy `/etc/rustine/tls/server/ca.pem` securely to RU_RELAY.
-2. On **RU_RELAY**, run the same installer, choose `relay`, enter the exit address, its certificate DNS name and the copied CA PEM. **Use the same strong password on both servers.** Copy the relay CA PEM securely to the client.
+2. On **RU_RELAY**, run the same installer, choose `relay`, enter the exit address, its certificate DNS name and the copied CA PEM. **Use the same strong password on both servers** (`sudo cat /etc/rustine/password` on the first server to retrieve a generated one). Copy the relay CA PEM securely to the client.
 3. On the client, set `RUSTINE_PASSWORD` (or `RUSTINE_PASSWORD_FILE`), adapt `configs/client.example.toml` and run:
 
 ```bash
